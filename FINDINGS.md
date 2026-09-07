@@ -501,3 +501,47 @@ With `--sample 10`, ten anomalous objects were downloaded at random (eight
 14,722,166. That is a sample of ten, not a census of all 555, and the claim is
 bounded accordingly. The full level-0 listing confirms exactly 499 objects at
 16 MB and 56 at 128 MB.
+
+## Root cause and repair (added after investigation)
+
+**The 555 oversized objects are stale chunks from earlier export runs at
+coarser chunk shapes, never deleted.** The exporter writes sparsely and
+overwrites the prefix in place, so objects from a previous run survive on
+every key the final run never wrote — which is exactly the set of chunks that
+are entirely fill.
+
+Evidence:
+- The 7,988 correctly-sized level-0 chunks are *exactly* the non-empty cells of
+  the 43×40×40 grid, verified against the volume's own level-2 and level-4
+  pyramids (set equality, both directions). Twelve random stale keys read
+  all-zero in level 2; twelve random correct keys read non-zero.
+- Stride autocorrelation on the stale bytes peaks at 1, 256 and 65,536 for the
+  16 MB objects (C-order 256³) and 1, 512 and 262,144 for the 128 MB objects
+  (512³). Cross-correlation locks a dense 256³ block to the current volume at
+  `key × 256` with r = 0.9993; for `0/6/8/11` all eight 128³ sub-cubes are
+  byte-identical to the current published chunks.
+- All 10,549 objects in the prefix have `LastModified` inside a 35-second
+  window on 2026-03-04, interleaved: one S3 copy pass, source already
+  contaminated. Multipart ETags (2 parts for 16 MB, 16 for 128 MB) are the
+  8 MiB default part size, a consequence of object size, not a cause.
+- Isolated: levels 1–5 of this volume are clean; five other fully-enumerated
+  volumes (285,735 / 207,230 / 166,316 / 406,415 objects and PHerc0500P2) show
+  no size anomaly.
+- Downstream: the eight published segments traced on this volume intersect
+  none of the 555 keys. No published output was computed over them.
+
+**Repair: delete the 555 objects.** They occupy 15,888,023,552 bytes
+(14.80 GiB, 48.7% of the volume's level-0 payload) and carry nothing the
+correct chunks do not already hold. Re-splitting would be wrong — it would
+write voxels from an older intensity window into regions the current mask
+clears. After deletion, readers get `fill_value: 0`, which is what the pyramid
+already says is there. The source prefix must be repaired the same way or the
+next sync restores them.
+
+**Prevention:** for the 63 uncompressed volumes, assert at publish time that
+every chunk object is exactly `prod(chunks) × itemsize`. One ListObjectsV2
+pass per volume.
+
+The 512³ objects' provenance is not established. The exporter
+(`mask_layers_zarr_export`) is not in any public repository; the in-place
+overwrite is inferred from the data.
