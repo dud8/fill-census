@@ -81,6 +81,23 @@ def _s3_walk(base, prefix):
             return out
 
 
+def _s3_dir(base, prefix):
+    """Every object and sub-prefix directly under `prefix`.
+
+    A delimiter listing is still a token chain: a directory with more than 1000
+    immediate children needs more than one page. Following it to the end here is
+    what keeps the sharded walk below from silently dropping the objects that
+    sit beside sub-prefixes on the second and later pages.
+    """
+    files, dirs, token = [], [], None
+    while True:
+        f, d, token = _s3_page(base, prefix, token, delimiter="/")
+        files += f
+        dirs += d
+        if not token:
+            return files, dirs
+
+
 def list_s3(base, prefix, workers=64, min_shards=128):
     """Every object under `prefix`, with exact sizes and MD5 ETags.
 
@@ -90,30 +107,27 @@ def list_s3(base, prefix, workers=64, min_shards=128):
     enough independent sub-prefixes to shard across, and those are then walked in
     parallel. Expansion stops as soon as the shard count is reached, so a small
     store still costs one request.
+
+    Every object is reached through exactly one shard or listed once during the
+    expansion, so the result holds no duplicate and drops nothing. Checked
+    against a plain serial walk by `tools/check_lister.py`.
     """
-    top, dirs, token = _s3_page(base, prefix, delimiter="/")
+    top, dirs = _s3_dir(base, prefix)
     if not dirs:
-        return top + (_s3_walk(base, prefix) if token else [])
-    out = list(top)
-    while len(dirs) < min_shards:
+        return top
+    out, leaves = list(top), []
+    while dirs and len(dirs) + len(leaves) < min_shards:
         with ThreadPoolExecutor(max_workers=min(workers, len(dirs))) as ex:
-            expanded = list(ex.map(
-                lambda d: _s3_page(base, d, delimiter="/"), dirs))
-        nxt, leaves = [], []
-        for (files, subs, tok), d in zip(expanded, dirs):
+            expanded = list(ex.map(lambda d: _s3_dir(base, d), dirs))
+        nxt = []
+        for (files, subs), d in zip(expanded, dirs):
             if subs:
+                out += files       # objects sitting beside the sub-prefixes
                 nxt += subs
-                out += files          # objects sitting beside the sub-prefixes
-                if tok:               # more than 1000 siblings: keep the whole
-                    leaves.append(d)  # directory as one shard instead
-                    nxt = [x for x in nxt if not x.startswith(d)]
-                    out = [e for e in out if not e.key.startswith(d)]
             else:
                 leaves.append(d)
-        if not nxt:
-            dirs = leaves
-            break
-        dirs = nxt + leaves
+        dirs = nxt
+    dirs += leaves
     with ThreadPoolExecutor(max_workers=min(workers, len(dirs))) as ex:
         for part in ex.map(lambda d: _s3_walk(base, d), dirs):
             out += part

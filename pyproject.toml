@@ -1,10 +1,10 @@
 [project]
 name = "fill-census"
-version = "1.0.0"
+version = "1.1.0"
 description = "Read-only storage census of the Vesuvius Challenge open data: how much stored data is provably empty, and what it costs"
 requires-python = ">=3.11"
 dependencies = []
-optional-dependencies = { compressed = ["numcodecs>=0.12"] }
+optional-dependencies = { compressed = ["numcodecs>=0.12"], occupancy = ["numpy>=1.24"] }
 license = { text = "MIT" }
 
 [project.scripts]

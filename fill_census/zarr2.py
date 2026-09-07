@@ -116,10 +116,6 @@ class Level:
     def n_chunks(self) -> tuple[int, ...]:
         return tuple(math.ceil(s / c) for s, c in zip(self.shape, self.chunks))
 
-    def chunk_key(self, idx) -> str:
-        sep = self.dimension_separator or "."
-        return sep.join(str(i) for i in idx)
-
 
 def root_to_base(access_root: str) -> str:
     """Map a catalog access_root to an HTTPS origin.
@@ -162,58 +158,3 @@ def read_multiscale(root: str, base: str = BUCKET) -> list[Level]:
             )
         )
     return levels
-
-
-def read_chunk(root: str, level: Level, idx, z_slab: tuple[int, int] | None = None,
-               base: str = BUCKET):
-    """Return a numpy array for one chunk, or None if the chunk is absent.
-
-    Absence is not an error: Zarr omits chunks that are entirely fill_value.
-
-    z_slab=(z0, z1) reads only that half-open range of leading-axis planes.
-    These stores are uncompressed and C-ordered, so a plane range is exactly one
-    contiguous byte range and can be served by an HTTP Range request. This is
-    what makes a whole-catalogue census affordable: verifying a 16-plane slab
-    moves 1/8th of the bytes of a full 128^3 chunk and is equally exact over the
-    planes it covers.
-    """
-    import numpy as np
-
-    url = f"{base.rstrip('/')}/{root.rstrip('/')}/{level.path}/{level.chunk_key(idx)}"
-    if level.filters:
-        raise Unsupported(f"{url}: filters are not supported")
-    if level.compressor is not None:
-        z_slab = None  # compressed chunks cannot be byte-ranged
-    if level.order != "C":
-        z_slab = None  # plane ranges are only contiguous in C order
-
-    plane = level.itemsize
-    for c in level.chunks[1:]:
-        plane *= c
-    br = None
-    if z_slab is not None:
-        z0, z1 = z_slab
-        z0 = max(0, z0)
-        z1 = min(level.chunks[0], z1)
-        if z1 <= z0:
-            return None
-        br = (z0 * plane, z1 * plane)
-        want = (z1 - z0) * plane
-    else:
-        want = level.chunk_nbytes
-
-    try:
-        raw = fetch(url, byte_range=br)
-    except Missing:
-        return None
-    if level.compressor is not None:
-        raw = decode_chunk(raw, level)
-        want = level.chunk_nbytes
-        br = None
-    if len(raw) != want:
-        raise ValueError(
-            f"{url}: got {len(raw)} bytes, declared shape/dtype/range require {want}"
-        )
-    a = np.frombuffer(raw, dtype=np.dtype(level.dtype))
-    nz = (z_slab[1] - z_slab[0]) if br else level.chunks[0]
-    return a.reshape((nz,) + tuple(level.chunks[1:]), order="C")

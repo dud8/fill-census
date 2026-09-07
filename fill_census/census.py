@@ -57,10 +57,11 @@ class StoreReport:
 
 def _is_all_fill(raw, level):
     """True if a chunk object's decoded bytes are entirely fill_value."""
-    body = decode_chunk(raw, level) if level.compressor is not None else raw
-    if len(body) != level.chunk_nbytes:
+    want = checks.fill_bytes(level)
+    if want is None:
         return False
-    return body == bytes([int(level.fill_value or 0)]) * level.chunk_nbytes
+    body = decode_chunk(raw, level) if level.compressor is not None else raw
+    return len(body) == level.chunk_nbytes and body == want
 
 
 def _resolve_compressed(base, root, level, entries, max_classes=512):
@@ -105,15 +106,17 @@ def _resolve_sampled(base, root, level, entries, n=256):
     """
     if not entries:
         return 0, 0, 0
+    want = checks.fill_bytes(level)
+    if want is None:
+        return 0, 0, 0
     step = max(1, len(entries) // n)
     picks = entries[::step][:n]
     plane = level.chunk_nbytes // level.chunks[0]
-    fill = int(level.fill_value or 0)
 
     def probe(e):
         try:
             head = fetch(f"{base}/{e.key}", byte_range=(0, plane))
-            if head != bytes([fill]) * len(head):
+            if head != want[:len(head)]:
                 return 0, 0
             return (1, e.size) if _is_all_fill(fetch(f"{base}/{e.key}"), level) else (0, 0)
         except (Missing, Unreachable, Unsupported):
@@ -169,6 +172,46 @@ def verify_occupancy(root, base=BUCKET, level="0"):
     }
 
 
+def verify_etag(root, base=BUCKET, level="0", n=64):
+    """Positive control for the assumption the whole census rests on.
+
+    The census reads an uncompressed store's ETags as whole-object MD5s. That is
+    what S3 documents for a single-part upload, but the bucket also holds
+    multipart objects, whose ETag is something else entirely. So rather than
+    assume the identity holds here, download a spread of ordinary chunks and
+    check that md5(bytes) really is the ETag S3 published for them.
+    """
+    import hashlib
+
+    from .inventory import list_store
+
+    levels = read_multiscale(root, base=base)
+    lv = next(l for l in levels if l.path == level)
+    entries = [e for e in list_store(base, f"{root}{level}/")[0]
+               if e.etag and not checks.is_multipart_etag(e.etag)
+               and not e.key.endswith(tuple(META_NAMES))]
+    step = max(1, len(entries) // n)
+    picks = entries[::step][:n]
+
+    def probe(e):
+        try:
+            raw = fetch(f"{base}/{e.key}")
+        except (Missing, Unreachable):
+            return None
+        return (hashlib.md5(raw).hexdigest() == e.etag, len(raw) == e.size)
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        got = [r for r in ex.map(probe, picks) if r is not None]
+    return {
+        "root": root, "level": level,
+        "objects_in_level": len(entries),
+        "objects_downloaded": len(got),
+        "etag_equals_md5_of_bytes": sum(1 for a, _ in got if a),
+        "length_equals_listed_size": sum(1 for _, b in got if b),
+        "identical": bool(got) and all(a and b for a, b in got),
+    }
+
+
 def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
                  keep_chunk_keys=False):
     """Inventory and classify one Zarr store. Returns a StoreReport."""
@@ -217,6 +260,7 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
 
     inexact = any(not e.exact for e in entries if e.size)
     n_fill_total = b_fill_total = 0
+    n_exh = b_exh = n_bounded = b_bounded = 0
     methods = set()
     all_etags = collections.Counter()
     etag_size = {}
@@ -245,14 +289,25 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
         n_fill = b_fill = 0
         method = "none"
         detail = {}
+        n_mp = sum(1 for e in ents if checks.is_multipart_etag(e.etag))
+        classified = 0
         if not ents:
             method = "no-chunks"
+        elif checks.fill_bytes(lv) is None:
+            # No usable fill value declared: there is no byte pattern to look
+            # for, so nothing is claimed about this level either way.
+            method = "fill-value-undeclared (not classified)"
         elif ents[0].etag and lv.compressor is None and not lv.filters:
             target = checks.fill_md5(lv)
             hits = [e for e in ents if e.etag == target]
             n_fill, b_fill = len(hits), sum(e.size for e in hits)
-            method = "etag-md5 (exhaustive)"
-            detail = {"fill_md5": target, "verified_by_download": 0}
+            classified = present - n_mp
+            method = ("etag-md5 (exhaustive)" if not n_mp else
+                      f"etag-md5 ({classified}/{present} objects; {n_mp} "
+                      f"multipart ETags carry no whole-object MD5 and were "
+                      f"not classified)")
+            detail = {"fill_md5": target, "verified_by_download": 0,
+                      "multipart_etags": n_mp, "objects_classified": classified}
             for e in hits[:verify_samples]:
                 try:
                     if _is_all_fill(fetch(f"{base}/{e.key}"), lv):
@@ -265,6 +320,7 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
             hits = [e for e in ents if e.etag in fe]
             n_fill, b_fill = len(hits), sum(e.size for e in hits)
             above = sum(1 for e in ents if e.size > ceil_b)
+            classified = covered
             # Classes are decoded smallest-first, so the guarantee this method
             # gives is a size ceiling: every stored object at or below it was
             # decoded and tested. Say so rather than quoting a bare percentage.
@@ -273,7 +329,7 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
                       f"{above} larger objects untested)")
             detail = {"classes_tested": tested, "classes_total": total,
                       "objects_covered": covered, "size_ceiling_tested": ceil_b,
-                      "objects_above_ceiling": above}
+                      "objects_above_ceiling": above, "multipart_etags": n_mp}
         else:
             sf, sb, tested = _resolve_sampled(base, root, lv, ents)
             method = f"sampled ({tested}/{len(ents)} chunks read)"
@@ -294,6 +350,16 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
                                           method))
             n_fill_total += n_fill
             b_fill_total += b_fill
+            if method.startswith("etag-md5"):
+                n_exh += classified
+                b_exh += b_present - sum(
+                    e.size for e in ents if checks.is_multipart_etag(e.etag))
+            else:
+                n_bounded += classified
+                b_bounded += sum(e.size for e in ents
+                                 if e.size <= detail["size_ceiling_tested"])
+        if n_mp:
+            rep.add(checks.check_multipart_etags(lv, n_mp, present))
         methods.add(method.split(" ")[0])
 
         per_level[lv.path] = {
@@ -308,6 +374,8 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
             "chunks_out_of_grid": len(oor),
             "all_fill_chunks": n_fill, "all_fill_bytes": b_fill,
             "all_fill_method": method, "all_fill_detail": detail,
+            "objects_classified": classified,
+            "multipart_etags": n_mp,
         }
         if verbose:
             print(f"    {lv.path}: {present}/{n_grid} chunks "
@@ -337,6 +405,11 @@ def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
         "bytes_metadata": bytes_meta,
         "all_fill_chunks": n_fill_total,
         "all_fill_bytes": b_fill_total,
+        "chunks_classified_exhaustive": n_exh,
+        "bytes_classified_exhaustive": b_exh,
+        "chunks_classified_bounded": n_bounded,
+        "bytes_classified_bounded": b_bounded,
+        "multipart_etags": sum(v["multipart_etags"] for v in per_level.values()),
         "all_fill_share_pct": round(100.0 * b_fill_total / b_chunks, 6) if b_chunks else 0.0,
         "sizes_exact": not inexact,
         "fill_methods": sorted(methods),

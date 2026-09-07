@@ -30,7 +30,28 @@ class Finding:
         return asdict(self)
 
 
-def fill_md5(level) -> str:
+def fill_bytes(level):
+    """The byte string of a chunk that is entirely fill_value, or None when the
+    stored metadata does not determine one.
+
+    Zarr v2 encodes a non-finite float fill as the JSON string "NaN"/"Infinity"
+    and a null fill means no fill value was declared at all. Neither fixes a
+    single byte pattern, so both are reported as a gap in coverage rather than
+    guessed at. Multi-byte dtypes are laid out through numpy so the declared
+    byte order is honoured instead of assumed.
+    """
+    fv = level.fill_value
+    if fv is None or isinstance(fv, str):
+        return None
+    n = level.chunk_nbytes
+    if level.itemsize == 1:
+        return bytes([int(fv) & 0xFF]) * n
+    import numpy as np
+    one = np.full(1, fv, dtype=np.dtype(level.dtype)).tobytes()
+    return one * (n // level.itemsize)
+
+
+def fill_md5(level) -> str | None:
     """MD5 of an uncompressed chunk that is entirely fill_value.
 
     S3 publishes the MD5 of every single-part object as its ETag, so for an
@@ -40,10 +61,22 @@ def fill_md5(level) -> str:
 
     Only valid when no codec is declared: blosc output for the same voxels is
     not the same byte string across library builds, so a compressed store's
-    all-fill chunks must be found by decoding representatives instead.
+    all-fill chunks must be found by decoding representatives instead. None when
+    the metadata declares no usable fill value.
     """
-    fill = int(level.fill_value or 0)
-    return hashlib.md5(bytes([fill]) * level.chunk_nbytes).hexdigest()
+    body = fill_bytes(level)
+    return hashlib.md5(body).hexdigest() if body is not None else None
+
+
+def is_multipart_etag(etag) -> bool:
+    """True for an ETag that is not a whole-object MD5.
+
+    S3 gives a multipart upload an ETag of the form <hash>-<partcount>, which is
+    the MD5 of the concatenated part MD5s, not of the object. Such an object
+    cannot be classified from its ETag, and this bucket does contain them, so
+    they are counted and excluded rather than assumed away.
+    """
+    return bool(etag) and "-" in etag
 
 
 # ---------------------------------------------------------------- keys
@@ -156,6 +189,25 @@ def check_all_fill(level, n_fill, bytes_fill, n_present, bytes_present,
         {"n_fill": n_fill, "bytes_fill": bytes_fill, "n_present": n_present,
          "bytes_present": bytes_present, "share_pct": round(share, 6),
          "method": method},
+    )]
+
+
+def check_multipart_etags(level, n_multipart, n_present) -> list[Finding]:
+    """Objects whose ETag is not a whole-object MD5.
+
+    The census classifies an uncompressed level from its ETags. An object
+    uploaded in parts carries the MD5 of its part hashes instead, so it cannot
+    be classified that way and is excluded from the exhaustive count. Reported
+    so the gap is a number rather than an assumption.
+    """
+    if not n_multipart:
+        return []
+    return [Finding(
+        "multipart_etag", "advisory", level.path,
+        f"{n_multipart} of {n_present} present chunks were uploaded in parts, "
+        f"so their ETag is the MD5 of the part hashes rather than of the object "
+        f"and they cannot be classified from listing metadata alone",
+        {"n_multipart": n_multipart, "n_present": n_present},
     )]
 
 

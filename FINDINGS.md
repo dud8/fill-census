@@ -3,7 +3,8 @@
 Generated from `reports/scan-full.json` by `make_readme.py`. Every figure comes from that run.
 
 Run: `python3 -m fill_census scan --workers 8 --out reports/scan-full.json`
-(2026-09-07T07:08:47Z, 5,114 s wall clock, 117 of 117 stores inventoried).
+(2026-09-07T08:37:38Z, 2,976 s wall clock, 117 of 117 published origins,
+114 distinct stores).
 
 ## Contract violations
 
@@ -454,12 +455,21 @@ The declared chunk is 2,097,152 B. An object of 16,777,216 B cannot be read as t
 
 ## Coverage and honesty
 
-- Fill classification was **exhaustive** for 107 stores
-  (134,066,300 chunks, 249.40 TiB) via ETag.
-- Fill classification was **sampled** for 10 stores
-  (2,059,377 chunks, 3.93 TiB) on the `https://data.aws.ash2txt.org`
-  access root, which exposes no content hash. Those sampled counts are **not**
-  included in any total.
+- **Exhaustive**: 129,776,533 chunks (247.53 TiB). Uncompressed, single-part
+  objects on S3, every one classified by comparing its ETag against the MD5 of
+  an all-fill chunk. 0 all-fill chunks were found on this path.
+- **Bounded by a size ceiling**: 122,340 chunks (7.52 GiB). Compressed
+  stores, where one representative of each byte-identical ETag class was
+  downloaded and decoded, smallest class first. 4,166,828 objects sit above the
+  per-level ceiling and were not decoded. 3,144 of the 3,144
+  all-fill chunks reported came from this path, so that part of the count is a
+  floor, not a census.
+- **Sampled**: 7 stores (1,843,333 chunks, 3.52 TiB) on the
+  `https://data.aws.ash2txt.org` access root, which publishes no content hash.
+  Their key sets and byte totals are in the population figures; their sampled
+  fill counts are **not** included in any all-fill total.
+- **Not classifiable**: 555 chunks carry a multipart ETag, which is
+  the MD5 of the part hashes rather than of the object.
 - 0 store(s) could not be inventoried.
 
 Every store in the catalogue was inventoried.
@@ -468,6 +478,7 @@ Every store in the catalogue was inventoried.
 
 - `all_fill`: 28 finding(s)
 - `duplicate_content`: 71 finding(s)
-- `foreign_key`: 24 finding(s)
-- `pyramid_cost`: 4 finding(s)
+- `foreign_key`: 22 finding(s)
+- `multipart_etag`: 1 finding(s)
+- `pyramid_cost`: 2 finding(s)
 - `replica_agreement`: 3 finding(s)

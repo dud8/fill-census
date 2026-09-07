@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import checks
-from .census import census_store, verify_occupancy
+from .census import census_store, verify_etag, verify_occupancy
 from .zarr2 import BUCKET, root_to_base
 
 CATALOG_LOCAL = "../_data/s3_metadata.json"
@@ -83,12 +83,21 @@ def _replica_findings(results):
         for f in fs:
             out.append(f.as_dict())
         if not fs:
+            # The two roots are measured by different machinery: exact byte
+            # counts from S3 against sizes rounded for display by an HTML
+            # index. Where the totals agree, the rounded parse is shown to
+            # have recovered the exact figure on real data.
+            ba = a["stats"]["bytes_chunks"]
+            bb = b["stats"]["bytes_chunks"]
             out.append(checks.Finding(
                 "replica_agreement", "advisory", None,
                 f"{name} is published under {a['access_root']} and "
                 f"{b['access_root']}; both present the identical set of "
-                f"{len(ka)} chunk keys",
-                {"n_keys": len(ka), "roots": [a["access_root"], b["access_root"]]},
+                f"{len(ka)} chunk keys, and their stored byte totals "
+                + (f"agree exactly at {ba}" if ba == bb else
+                   f"differ: {ba} against {bb}"),
+                {"n_keys": len(ka), "roots": [a["access_root"], b["access_root"]],
+                 "bytes": [ba, bb], "bytes_agree": ba == bb},
             ).as_dict())
     return out
 
@@ -117,6 +126,14 @@ def main(argv=None):
     v.add_argument("--base", default=None)
     v.add_argument("--level", default="0")
 
+    e = sub.add_parser("verify-etag",
+                       help="download a spread of chunks and check that the "
+                            "ETag S3 published really is the MD5 of the bytes")
+    e.add_argument("root")
+    e.add_argument("--base", default=None)
+    e.add_argument("--level", default="0")
+    e.add_argument("-n", type=int, default=64)
+
     s = sub.add_parser("scan", help="census every published Zarr store")
     s.add_argument("--catalog", default=None)
     s.add_argument("--kinds", default=",".join(KINDS))
@@ -135,6 +152,11 @@ def main(argv=None):
 
     if a.cmd == "verify-occupancy":
         got = verify_occupancy(a.root, base=a.base or BUCKET, level=a.level)
+        print(json.dumps(got, indent=2))
+        return 0 if got["identical"] else 2
+
+    if a.cmd == "verify-etag":
+        got = verify_etag(a.root, base=a.base or BUCKET, level=a.level, n=a.n)
         print(json.dumps(got, indent=2))
         return 0 if got["identical"] else 2
 
@@ -169,21 +191,44 @@ def main(argv=None):
 
     ok = [r for r in results if not r["error"]]
     bad = [r for r in results if not r["ok"]]
-    tot_bytes = sum(r["stats"].get("bytes_chunks", 0) for r in ok)
-    fill_bytes = sum(r["stats"].get("all_fill_bytes", 0) for r in ok)
+    # A store published under two access roots is ONE store. Totals count each
+    # store once, keeping the origin whose sizes are exact byte counts; counting
+    # both origins would inflate every population figure by that store's size.
+    uniq = {}
+    for r in ok:
+        cur = uniq.get(r["block"])
+        if cur is None or (r["stats"].get("sizes_exact")
+                           and not cur["stats"].get("sizes_exact")):
+            uniq[r["block"]] = r
+    distinct = list(uniq.values())
+    counted = {id(r) for r in distinct}
+    for r in results:
+        r["counted"] = id(r) in counted
+    tot = lambda k: sum(r["stats"].get(k, 0) for r in distinct)
+    tot_bytes = tot("bytes_chunks")
+    fill_bytes = tot("all_fill_bytes")
     summary = {
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "n_stores": len(results),
+        "n_origins": len(results),
+        "n_stores": len(uniq),
         "n_ok": len(ok),
         "n_error": len(results) - len(ok),
         "n_with_contract_finding": len([r for r in bad if not r["error"]]),
         "totals": {
-            "objects": sum(r["stats"].get("n_objects", 0) for r in ok),
-            "chunks_present": sum(r["stats"].get("chunks_present", 0) for r in ok),
-            "chunks_in_grid": sum(r["stats"].get("chunks_in_grid", 0) for r in ok),
+            "objects": tot("n_objects"),
+            "chunks_present": tot("chunks_present"),
+            "chunks_in_grid": tot("chunks_in_grid"),
             "bytes_chunks": tot_bytes,
-            "bytes_metadata": sum(r["stats"].get("bytes_metadata", 0) for r in ok),
-            "all_fill_chunks": sum(r["stats"].get("all_fill_chunks", 0) for r in ok),
+            "bytes_chunks_exact": sum(r["stats"].get("bytes_chunks", 0)
+                                      for r in distinct
+                                      if r["stats"].get("sizes_exact")),
+            "bytes_metadata": tot("bytes_metadata"),
+            "chunks_classified_exhaustive": tot("chunks_classified_exhaustive"),
+            "bytes_classified_exhaustive": tot("bytes_classified_exhaustive"),
+            "chunks_classified_bounded": tot("chunks_classified_bounded"),
+            "bytes_classified_bounded": tot("bytes_classified_bounded"),
+            "multipart_etags": tot("multipart_etags"),
+            "all_fill_chunks": tot("all_fill_chunks"),
             "all_fill_bytes": fill_bytes,
             "all_fill_share_pct": round(100.0 * fill_bytes / tot_bytes, 8)
             if tot_bytes else 0.0,
@@ -196,7 +241,8 @@ def main(argv=None):
     with open(a.out, "w") as fh:
         json.dump(summary, fh, indent=1)
     t = summary["totals"]
-    print(f"\n{len(ok)}/{len(results)} stores inventoried; "
+    print(f"\n{len(ok)}/{len(results)} origins ({len(uniq)} distinct stores) "
+          f"inventoried; "
           f"{t['chunks_present']} chunks, {t['bytes_chunks']} B, "
           f"{t['all_fill_chunks']} all-fill ({t['all_fill_bytes']} B). "
           f"wrote {a.out} in {summary['seconds']}s")

@@ -15,24 +15,33 @@ population, read-only and without credentials.
 
 | | |
 |---|---|
-| Zarr stores inventoried | **117** of 117 |
-| stored objects enumerated | **136,127,008** |
-| chunks present | **136,125,677** |
-| chunks in the declared grids | 433,650,543 |
-| population occupancy | **31.39%** |
-| stored chunk bytes | **253.33 TiB** (278,540,518,220,412 B) |
-| chunks exhaustively classified for fill | **134,066,300** (249.40 TiB) |
+| Zarr stores inventoried | **114** distinct stores, from 117 published origins |
+| stored objects enumerated | **135,910,932** |
+| chunks present | **135,909,633** |
+| chunks in the declared grids | 433,367,457 |
+| population occupancy | **31.36%** |
+| stored chunk bytes | **252.92 TiB** (278,087,441,113,724 B) |
+| of those bytes, exact counts published by S3 | 249.40 TiB |
+| chunks classified **exhaustively**, ETag against the all-fill MD5 | **129,776,533** (247.53 TiB) |
+| chunks **decoded**, compressed, one representative per ETag class at or below the level's tested size ceiling | 122,340 (7.52 GiB) |
+| chunks **not decoded**, compressed, above that ceiling or in a class beyond the tested set | 4,166,872 |
+| chunks **sampled only**, access root publishes no content hash | 1,843,333 (3.52 TiB) |
+| chunks **not classifiable** from listing metadata, multipart ETag | 555 |
 | chunks present **and entirely `fill_value`** | **3,144** |
 | bytes those cost | **17.53 MiB** (18,386,112 B) |
-| share of exhaustively-classified stored bytes | **0.0000066%** |
 | chunks whose stored size disagrees with geometry | **555** |
 | chunk keys stored outside the declared grid | **0** |
 | contract violations | **1** |
-| wall clock, whole population | **5,114 s** |
+| wall clock, whole population | **2,976 s** |
 
-**3,144 present chunks across the population are entirely `fill_value`**, costing 17.53 MiB -- 0.0000066% of the 249.40 TiB exhaustively classified. As a hosting bill that is nothing, and it is reported as nothing. As a signal it is not nothing, because of where they are. Every one of them is in a `surface-prediction-zarr` store -- 28 of the 43 of them -- and not one is in any `ome-zarr` store (64 stores, 130,183,005 present chunks, every one of them classified, none all-fill). Every one is at level `0`: the reduced levels of the same stores omit their empty chunks correctly, so the downsampling path is right and the level-0 writer is the one emitting blocks it did not intend to.
+The classification rows above are the whole honesty of this report, so they are
+stated before anything else. Every present chunk falls in exactly one of them
+and they sum to 135,909,633. Only the first is a census in the strict
+sense.
 
-**1 contract violation**; see `FINDINGS.md`. Everything else holds: not one of the 136,125,677 stored chunk keys indexes outside its own declared chunk grid; the 3 volumes published under both access roots present identical chunk key sets under both, down to the last of 210,858 keys; 116 of 117 stores hold no object whose stored size disagrees with the geometry its own `.zarray` declares.
+**3,144 present chunks are entirely `fill_value`**, costing 17.53 MiB against the 252.92 TiB published. As a hosting bill that is nothing, and it is reported as nothing. As a signal it is not nothing, because of where they are. Every one of them is in a `surface-prediction-zarr` store -- 28 of the 43 of them -- and not one is in any of the 64 `ome-zarr` stores classified by ETag (129,778,779 chunks tested against the all-fill pattern, none matching). Every one is at level `0`. An all-fill chunk in these stores encodes to exactly 5,848 bytes. 1 reduced level was tested only below that size (PHerc0139 level 1), so it cannot be called clean; every other reduced level of every classified store was tested at or above it, so a reduced level holding an all-fill chunk would have been caught. At level `0` itself, 1 store was tested only below that size (PHerc0139), so the count above is a floor there too.
+
+**1 contract violation**; see `FINDINGS.md`. Everything else holds: not one of the 135,909,633 stored chunk keys indexes outside its own declared chunk grid; the 3 volumes published under both access roots present identical chunk key sets under both, down to the last of 210,858 keys; 113 of 114 stores hold no object whose stored size disagrees with the geometry its own `.zarray` declares.
 
 ## The measurement, and why it is affordable
 
@@ -45,9 +54,21 @@ md5(b"\x00" * 2097152) = b2d1236c286a3c0704224fe4105eca49
 ```
 
 So for an uncompressed store the entire question is answered from
-`ListObjectsV2` metadata. **No chunk bytes move at all.** 134,066,300 chunks
-were classified this way, and a sample of the matches was downloaded and
-byte-verified to confirm the hash is doing what it claims.
+`ListObjectsV2` metadata. **No chunk bytes move at all.** 129,776,533 chunks
+were classified this way.
+
+That identity is the load-bearing assumption of the whole report, and this
+bucket does not honour it everywhere: an object uploaded in parts carries the
+MD5 of its part hashes instead, and 555 stored chunks are such
+objects. They are counted, excluded from the exhaustive figure, and reported as
+`multipart_etag` advisories rather than assumed away. For the rest, the identity
+is not assumed either -- it is measured:
+
+`PHerc0343P/volumes/20250521134555-8.640um-1.2m-116keV-masked.zarr/` level `0` holds 7,988 single-part objects. 64 of them, spread across the level, were downloaded and hashed: **64 of 64 had an ETag exactly equal to the MD5 of the bytes S3 returned**, and 64 matched the listed size. Reproduce with:
+
+```sh
+python3 -m fill_census verify-etag PHerc0343P/volumes/20250521134555-8.640um-1.2m-116keV-masked.zarr/
+```
 
 Compressed stores cannot use that shortcut: blosc output for the same voxels is
 not the same byte string across library builds, and measurably is not here --
@@ -58,20 +79,29 @@ downloaded and decoded, smallest class first. Every all-fill chunk in one store
 shares one class, so the guarantee is a size ceiling, reported per level: every
 stored object at or below it was decoded and tested.
 
-The sharded lister was checked against a plain serial `ListObjectsV2` walk on
-two stores: identical key sets, identical byte totals, no duplicated key.
+The sharded lister must neither drop a key nor return one twice, so it is
+checked against the simplest possible implementation -- a plain serial
+`ListObjectsV2` token chain:
 
-There is one place in the population where independent ground truth exists. `PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/` ships its own `0/.chunk_occupancy.npz`, a boolean array over the level-0 chunk grid written by whoever published the store. The census agrees on every cell of that 593 x 256 x 256 = 38,862,848-cell grid: **9,917,101 chunks measured present, 9,917,101 marked occupied, 0 cells disagreeing.** Reproduce with:
+```
+ok   PHerc0343P/volumes/20250521134555-8.640um-1.2m-116keV-masked.zarr/: sharded 10549 objects 36815516839 B / serial 10549 objects 36815516839 B; missing 0, extra 0, duplicated 0
+ok   PHercMANB/representations/predictions/surfaces/20260323091048-surface-20260413222639-surface-m7-L2-th0.2.zarr/: sharded 83842 objects 9740677468 B / serial 83842 objects 9740677468 B; missing 0, extra 0, duplicated 0
+```
+
+There is one place in the population where independent ground truth exists. `PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/` ships its own `0/.chunk_occupancy.npz`, a boolean array over the level-0 chunk grid written by whoever published the store. The census agrees on every cell of that 593 x 256 x 256 = 38,862,848-cell grid: **9,917,101 chunks measured present, 9,917,101 marked occupied, 0 cells disagreeing.**  Two of that grid's three extents are equal (256 and 256), so this agreement does not by itself rule out a transposition of those two axes; the leading extent (593) differs and is pinned by it. Reproduce with:
 
 ```sh
 python3 -m fill_census verify-occupancy PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/
 ```
 
 The `https://data.aws.ash2txt.org` access root exposes no content hash and no
-bulk listing -- only an HTML directory index with human-rounded sizes. Those
-10 stores (2,059,377 chunks, 3.93 TiB) are enumerated
-exhaustively by walking the index, but their fill counts are **sampled, and are
-never folded into the totals above.**
+bulk listing -- only an HTML directory index with human-rounded sizes. The
+7 stores published only there (1,843,333 chunks, 3.52 TiB) are
+enumerated exhaustively by walking the index, but their fill counts are
+**sampled, and are never folded into the all-fill totals above.** The stores
+published under both roots are counted from S3, where the sizes are exact.
+
+That rounding is not assumed to be harmless either. 3 stores are published under both roots, so the same bytes are measured twice by different machinery. 3 of 3 agree on the stored byte total exactly -- up to 411.83 GiB across 210,858 chunk keys -- so on these stores the rounded index recovered the exact figure.
 
 ## What is checked
 
@@ -84,6 +114,7 @@ never folded into the totals above.**
 | `duplicate_content` | advisory | chunks that are byte-for-byte copies of another chunk in the same store |
 | `foreign_key` | advisory | objects under a store prefix that are neither Zarr metadata nor a chunk of a declared level |
 | `pyramid_cost` | advisory | a reduced level's stored bytes against what its shape reduction implies |
+| `multipart_etag` | advisory | chunks whose ETag is the MD5 of their part hashes, not of the object, and which therefore cannot be classified from listing metadata |
 
 Occupancy per level is reported for every store whether or not anything is
 flagged; it is a published statistic in its own right and nobody had it.
@@ -92,8 +123,9 @@ flagged; it is a published statistic in its own right and nobody had it.
 
 ### Occupancy and cost by pyramid level
 
-Summed over the 107 stores whose fill was classified exhaustively by
-ETag. Occupancy is the fraction of the declared chunk grid that is actually
+Summed over the 107 stores whose fill was classified from ETags
+(exhaustively for the uncompressed ones, up to a size ceiling for the
+compressed ones). Occupancy is the fraction of the declared chunk grid that is actually
 stored; the rest is absent, which is correct sparse Zarr and costs nothing.
 
 | level | chunks present | chunks in grid | occupancy | stored bytes | all-fill chunks | all-fill bytes |
@@ -107,10 +139,10 @@ stored; the rest is absent, which is correct sparse Zarr and costs nothing.
 
 ### Where the all-fill chunks are
 
-| kind | stores | stores holding all-fill chunks | chunks present | all-fill chunks |
+| kind | stores classified by ETag | stores holding all-fill chunks | chunks tested for fill | all-fill chunks |
 |---|---|---|---|---|
-| `ome-zarr` | 64 | **0** | 130,183,005 | 0 |
-| `surface-prediction-zarr` | 43 | **28** | 3,883,295 | 3,144 |
+| `ome-zarr` | 64 | **0** | 129,778,779 | 0 |
+| `surface-prediction-zarr` | 43 | **28** | 120,094 | 3,144 |
 
 Levels holding all-fill chunks: **`0`**.
 
@@ -151,14 +183,14 @@ Levels holding all-fill chunks: **`0`**.
 
 | kind | stores | chunks | stored bytes |
 |---|---|---|---|
-| `ome-zarr` | 74 | 132,242,382 | 252.03 TiB |
+| `ome-zarr` | 71 | 132,026,338 | 251.62 TiB |
 | `surface-prediction-zarr` | 43 | 3,883,295 | 1.30 TiB |
 
 ### Duplicate content
 
-350,997 of 136,125,677 stored chunks are byte-for-byte duplicates of
-another chunk in the same store, costing **465.68 GiB**. This is not a
-defect: Zarr addresses chunks by position, so identical content at two positions
+350,997 of the 134,066,300 chunks whose content hash S3 publishes are
+byte-for-byte duplicates of another chunk in the same store, costing
+**465.68 GiB**. This is not a defect: Zarr addresses chunks by position, so identical content at two positions
 must be stored twice. It is reported because it is the other half of the same
 hosting-cost question, and it was free to compute once every object's MD5 was
 in hand.
@@ -173,11 +205,13 @@ python3 -m tests.test_census                  # self-check, no pytest
 python3 -m fill_census check <store-root>     # one store
 python3 -m fill_census scan --workers 8 --out reports/scan-full.json
 python3 -m fill_census verify-occupancy <store-root>   # against a published map
+python3 -m fill_census verify-etag <store-root>        # ETag really is the MD5
+python3 tools/check_lister.py <store-root>             # sharded vs serial walk
 python3 make_readme.py reports/scan-full.json # regenerate this file
 ```
 
-`numcodecs` is needed only for the compressed stores (`pip install
-'fill-census[compressed]'`). Exit status: 0 clean, 2 contract violation, 1 tool
+`numcodecs` is needed only for the compressed stores and `numpy` only for
+`verify-occupancy` (`pip install 'fill-census[compressed,occupancy]'`). Exit status: 0 clean, 2 contract violation, 1 tool
 error.
 
 The catalogue is read from `../_data/s3_metadata.json`. Every origin is resolved
@@ -190,21 +224,33 @@ them reports real stores as missing.
 - **It does not prove the non-fill chunks are correct.** A chunk that is not
   entirely `fill_value` is counted as carrying information. Whether that
   information is right is a different question and is not asked here.
-- **The compressed stores are not fully exhaustive.** Every object at or below a
-  per-level size ceiling was decoded and tested; larger objects were not. The
-  ceiling and the number of untested objects are reported per level in
-  `reports/scan-full.json`. An all-fill chunk larger than the ceiling would be
-  missed.
-- **The 10 stores on the HTML-index access root are sampled, not
+- **The compressed stores are not exhaustive.** Every object at or below a
+  per-level size ceiling was decoded and tested; the 4,166,828 objects above it
+  were not. The ceiling and the untested count are reported per level in
+  `reports/scan-full.json`. An all-fill chunk that encoded to more bytes than
+  the ceiling would be missed. This is most of the compressed population by
+  object count, and it is where every all-fill chunk found here lives.
+- **The 7 stores on the HTML-index access root are sampled, not
   censused, for fill.** Their key sets and occupancy are exhaustive; their fill
-  counts are not, and are excluded from every total.
+  counts are not, and are excluded from every all-fill total. Their bytes are
+  in the population totals, tagged as rounded.
 - **Sizes from the HTML index are rounded for display.** A chunk truncated by a
   few kilobytes still displays as `2.0 MiB`, so `chunk_size` is downgraded to
   advisory on that root.
-- **ETag equality is MD5 equality.** Two objects with the same MD5 are treated
+- **ETag equality is MD5 equality.** Two objects with the same ETag are treated
   as the same bytes. A deliberate collision would defeat this; accidental
-  collision at this population size is not a practical concern, and the all-fill
-  matches were byte-verified by download.
+  collision at this population size is not a practical concern. Every all-fill
+  chunk reported here was found by downloading and decoding one member of its
+  ETag class, so the class was observed to be all-fill; that every other member
+  of the class holds the same bytes is what the hash is being trusted for.
+  555 objects publish no whole-object MD5 at all, because they were
+  uploaded in parts; they are excluded rather than guessed at.
+- **The all-fill count is not one number of one kind.** 0 of the
+  3,144 reported come from the exhaustive path and 3,144 from the
+  compressed path, whose guarantee is the size ceiling above, not
+  exhaustiveness. That part of the count is exact for the ETag classes that
+  were decoded and says nothing about the 4,166,828 objects larger than the
+  ceiling.
 - **It does not say the all-fill chunks should be deleted.** Deleting a present
   chunk changes nothing a correct Zarr reader sees, but this tool has not
   verified that every consumer of these stores is a correct Zarr reader.

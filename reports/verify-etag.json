@@ -1,0 +1,9 @@
+{
+  "root": "PHerc0343P/volumes/20250521134555-8.640um-1.2m-116keV-masked.zarr/",
+  "level": "0",
+  "objects_in_level": 7988,
+  "objects_downloaded": 64,
+  "etag_equals_md5_of_bytes": 64,
+  "length_equals_listed_size": 64,
+  "identical": true
+}

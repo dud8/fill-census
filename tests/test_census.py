@@ -10,9 +10,9 @@ import sys
 
 sys.path.insert(0, ".")
 
-from fill_census import checks
+from fill_census import checks, inventory
 from fill_census.inventory import (Entry, _IDX_HREF, _S3_ENTRY, _parse_size,
-                                   _index_page)
+                                   _index_page, _s3_dir)
 from fill_census.zarr2 import Level, root_to_base
 
 
@@ -132,6 +132,68 @@ def test_fill_md5_matches_real_zero_bytes():
     big = L()
     assert checks.fill_md5(big) == "b2d1236c286a3c0704224fe4105eca49"
     print("  fill md5 ok")
+
+
+def test_fill_bytes_honours_dtype_and_undeclared_fills():
+    """The fill pattern comes from the dtype, and is refused when undeclared."""
+    assert checks.fill_bytes(L(chunks=(2, 2, 2))) == b"\x00" * 8
+    assert checks.fill_bytes(L(chunks=(2, 2, 2), fill=7)) == bytes([7]) * 8
+    # KNOWN-BAD: a 2-byte dtype must not be filled a byte at a time. 258 is
+    # 0x0102, so the pattern differs between big and little endian and a
+    # bytes([fill]) shortcut would be silently wrong for both.
+    be = L(chunks=(2, 2, 2), dtype=">u2", fill=258)
+    le = L(chunks=(2, 2, 2), dtype="<u2", fill=258)
+    assert checks.fill_bytes(be) == b"\x01\x02" * 8
+    assert checks.fill_bytes(le) == b"\x02\x01" * 8
+    assert checks.fill_bytes(be) != bytes([258 & 0xFF]) * 16
+    # A signed fill wraps to its stored byte rather than raising.
+    assert checks.fill_bytes(L(chunks=(2, 2, 2), dtype="|i1", fill=-1)) == b"\xff" * 8
+    # No usable pattern: null fill, and the JSON spellings of non-finite floats.
+    for bad in (None, "NaN", "Infinity", "-Infinity"):
+        lv = L(chunks=(2, 2, 2), dtype="<f4", fill=bad)
+        assert checks.fill_bytes(lv) is None, bad
+        assert checks.fill_md5(lv) is None, bad
+    print("  fill bytes ok")
+
+
+def test_multipart_etag_is_not_an_md5():
+    """KNOWN-BAD: a multipart ETag is the MD5 of the part hashes, not the object."""
+    assert not checks.is_multipart_etag("b2d1236c286a3c0704224fe4105eca49")
+    assert not checks.is_multipart_etag(None)
+    assert checks.is_multipart_etag("9e3ab5ec5a16c61cc90bef1c8d009d70-16")
+    lv = L()
+    assert checks.check_multipart_etags(lv, 0, 100) == []
+    f = checks.check_multipart_etags(lv, 555, 8543)
+    assert len(f) == 1 and f[0].severity == "advisory", f
+    assert f[0].data["n_multipart"] == 555
+    print("  multipart etag ok")
+
+
+def test_delimiter_listing_follows_its_own_pagination():
+    """KNOWN-BAD: a delimiter listing is a token chain like any other.
+
+    Stopping at its first page drops every object that sits beside a
+    sub-prefix on page two, and the census would under-count them silently.
+    """
+    pages = [
+        ('<Contents><Key>r/a</Key><ETag>&quot;e1&quot;</ETag><Size>1</Size>'
+         '</Contents><CommonPrefixes><Prefix>r/0/</Prefix></CommonPrefixes>'
+         '<NextContinuationToken>t1</NextContinuationToken>'),
+        ('<Contents><Key>r/b</Key><ETag>&quot;e2&quot;</ETag><Size>2</Size>'
+         '</Contents><CommonPrefixes><Prefix>r/1/</Prefix></CommonPrefixes>'),
+    ]
+    calls = []
+    real = inventory.fetch
+    inventory.fetch = lambda url, **kw: (calls.append(url),
+                                         pages[len(calls) - 1].encode())[1]
+    try:
+        files, dirs = _s3_dir("https://host", "r/")
+    finally:
+        inventory.fetch = real
+    assert [e.key for e in files] == ["r/a", "r/b"], files
+    assert dirs == ["r/0/", "r/1/"], dirs
+    assert len(calls) == 2 and "continuation-token=t1" in calls[1], calls
+    print("  delimiter pagination ok")
 
 
 def test_all_fill_reporting():
