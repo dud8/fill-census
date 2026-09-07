@@ -1,0 +1,15 @@
+[project]
+name = "fill-census"
+version = "1.0.0"
+description = "Read-only storage census of the Vesuvius Challenge open data: how much stored data is provably empty, and what it costs"
+requires-python = ">=3.11"
+dependencies = []
+optional-dependencies = { compressed = ["numcodecs>=0.12"] }
+license = { text = "MIT" }
+
+[project.scripts]
+fill-census = "fill_census.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
