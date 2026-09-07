@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import checks
-from .census import census_store
+from .census import census_store, verify_occupancy
 from .zarr2 import BUCKET, root_to_base
 
 CATALOG_LOCAL = "../_data/s3_metadata.json"
@@ -110,6 +110,13 @@ def main(argv=None):
     c.add_argument("root")
     c.add_argument("--base", default=None)
 
+    v = sub.add_parser("verify-occupancy",
+                       help="compare measured occupancy against a store's own "
+                            ".chunk_occupancy.npz, where one is published")
+    v.add_argument("root")
+    v.add_argument("--base", default=None)
+    v.add_argument("--level", default="0")
+
     s = sub.add_parser("scan", help="census every published Zarr store")
     s.add_argument("--catalog", default=None)
     s.add_argument("--kinds", default=",".join(KINDS))
@@ -125,6 +132,11 @@ def main(argv=None):
                           "stats": rep.stats, "levels": rep.levels,
                           "findings": rep.findings}, indent=2))
         return 0 if rep.ok else 2
+
+    if a.cmd == "verify-occupancy":
+        got = verify_occupancy(a.root, base=a.base or BUCKET, level=a.level)
+        print(json.dumps(got, indent=2))
+        return 0 if got["identical"] else 2
 
     stores = load_catalog(a.catalog, tuple(a.kinds.split(",")))
     if a.limit:

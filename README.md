@@ -61,6 +61,12 @@ stored object at or below it was decoded and tested.
 The sharded lister was checked against a plain serial `ListObjectsV2` walk on
 two stores: identical key sets, identical byte totals, no duplicated key.
 
+There is one place in the population where independent ground truth exists. `PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/` ships its own `0/.chunk_occupancy.npz`, a boolean array over the level-0 chunk grid written by whoever published the store. The census agrees on every cell of that 593 x 256 x 256 = 38,862,848-cell grid: **9,917,101 chunks measured present, 9,917,101 marked occupied, 0 cells disagreeing.** Reproduce with:
+
+```sh
+python3 -m fill_census verify-occupancy PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/
+```
+
 The `https://data.aws.ash2txt.org` access root exposes no content hash and no
 bulk listing -- only an HTML directory index with human-rounded sizes. Those
 10 stores (2,059,377 chunks, 3.93 TiB) are enumerated
@@ -166,6 +172,7 @@ No credentials, nothing is written to the bucket, no dependency on `zarr`,
 python3 -m tests.test_census                  # self-check, no pytest
 python3 -m fill_census check <store-root>     # one store
 python3 -m fill_census scan --workers 8 --out reports/scan-full.json
+python3 -m fill_census verify-occupancy <store-root>   # against a published map
 python3 make_readme.py reports/scan-full.json # regenerate this file
 ```
 

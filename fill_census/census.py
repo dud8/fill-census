@@ -129,6 +129,46 @@ def _resolve_sampled(base, root, level, entries, n=256):
     return n_fill, b_fill, tested
 
 
+def verify_occupancy(root, base=BUCKET, level="0"):
+    """Compare the measured chunk key set against a publisher-written occupancy
+    map, where one exists.
+
+    One store in the catalogue ships `<level>/.chunk_occupancy.npz`, a boolean
+    array over the level's chunk grid written by whoever published it. It is
+    independent ground truth for exactly the quantity this tool measures, so it
+    is worth checking against rather than only asserting the method is sound.
+    """
+    import io
+    import numpy as np
+
+    from .inventory import list_store
+
+    levels = read_multiscale(root, base=base)
+    lv = next(l for l in levels if l.path == level)
+    occ = np.load(io.BytesIO(fetch(
+        f"{base.rstrip('/')}/{root}{level}/.chunk_occupancy.npz")))["occupancy"]
+    entries, _ = list_store(base, f"{root}{level}/")
+    from . import checks
+    keys = set()
+    for e in entries:
+        idx = checks.parse_chunk_key(e.key[len(root) + len(level) + 1:], lv,
+                                     len(lv.shape))
+        if idx is not None:
+            keys.add(idx)
+    mine = np.zeros(occ.shape, dtype=bool)
+    for i in keys:
+        if all(a < b for a, b in zip(i, occ.shape)):
+            mine[i] = True
+    return {
+        "root": root, "level": level, "grid": list(occ.shape),
+        "published_occupied": int(occ.sum()),
+        "measured_present": len(keys),
+        "cells_disagreeing": int((mine != occ).sum()),
+        "grid_cells": int(occ.size),
+        "identical": bool((mine == occ).all()),
+    }
+
+
 def census_store(root, base=BUCKET, verify_samples=4, verbose=False,
                  keep_chunk_keys=False):
     """Inventory and classify one Zarr store. Returns a StoreReport."""

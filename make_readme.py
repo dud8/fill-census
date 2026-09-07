@@ -131,6 +131,8 @@ stored object at or below it was decoded and tested.
 The sharded lister was checked against a plain serial `ListObjectsV2` walk on
 two stores: identical key sets, identical byte totals, no duplicated key.
 
+{occ_check}
+
 The `https://data.aws.ash2txt.org` access root exposes no content hash and no
 bulk listing -- only an HTML directory index with human-rounded sizes. Those
 {n_sampled} stores ({sa_chunks} chunks, {sa_bytes_h}) are enumerated
@@ -200,6 +202,7 @@ No credentials, nothing is written to the bucket, no dependency on `zarr`,
 python3 -m tests.test_census                  # self-check, no pytest
 python3 -m fill_census check <store-root>     # one store
 python3 -m fill_census scan --workers 8 --out reports/scan-full.json
+python3 -m fill_census verify-occupancy <store-root>   # against a published map
 python3 make_readme.py reports/scan-full.json # regenerate this file
 ```
 
@@ -316,6 +319,34 @@ def fill_kind_table(ctx):
     return "\n".join(
         f"| `{k}` | {total[k]} | **{hit.get(k, 0)}** | {commas(chunks[k])} | "
         f"{commas(kinds.get(k, 0))} |" for k in sorted(total))
+
+
+def occ_check(path="reports/verify-occupancy.json"):
+    """One store in the catalogue ships its own occupancy map. Check against it.
+
+    `PHercParis4/.../0/.chunk_occupancy.npz` is a boolean array over the level-0
+    chunk grid, written by whoever published the store. It is independent ground
+    truth for exactly the quantity measured here, and it is the only place in
+    the population where such ground truth exists.
+    """
+    try:
+        with open(path) as fh:
+            v = json.load(fh)
+    except OSError:
+        return ""
+    verdict = ("agrees on every cell" if v["identical"]
+               else f"disagrees on {commas(v['cells_disagreeing'])} cells")
+    return (
+        f"There is one place in the population where independent ground truth "
+        f"exists. `{v['root']}` ships its own "
+        f"`{v['level']}/.chunk_occupancy.npz`, a boolean array over the level-"
+        f"{v['level']} chunk grid written by whoever published the store. The "
+        f"census {verdict} of that {' x '.join(map(str, v['grid']))} = "
+        f"{commas(v['grid_cells'])}-cell grid: **{commas(v['measured_present'])} "
+        f"chunks measured present, {commas(v['published_occupied'])} marked "
+        f"occupied, {commas(v['cells_disagreeing'])} cells disagreeing.** "
+        f"Reproduce with:\n\n```sh\npython3 -m fill_census verify-occupancy "
+        f"{v['root']}\n```")
 
 
 def headline(ctx):
@@ -514,6 +545,7 @@ def main(path):
         n_contract=len(ctx["contract"]), seconds=commas(int(rep["seconds"])),
         headline=headline(ctx), n_sampled=len(ctx["sampled"]),
         sa_chunks=commas(ctx["sa_chunks"]), sa_bytes_h=human(ctx["sa_bytes"]),
+        occ_check=occ_check(),
         level_table=level_table(ctx), fill_table=fill_table(ctx),
         n_exhaustive=len(ctx["exhaustive"]),
         fill_kind_table=fill_kind_table(ctx),

@@ -1,0 +1,14 @@
+{
+  "root": "PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr/",
+  "level": "0",
+  "grid": [
+    593,
+    256,
+    256
+  ],
+  "published_occupied": 9917101,
+  "measured_present": 9917101,
+  "cells_disagreeing": 0,
+  "grid_cells": 38862848,
+  "identical": true
+}
