@@ -482,3 +482,22 @@ Every store in the catalogue was inventoried.
 - `multipart_etag`: 1 finding(s)
 - `pyramid_cost`: 2 finding(s)
 - `replica_agreement`: 3 finding(s)
+
+## Reader test (added after review)
+
+The `chunk_size` finding was originally inferred from object sizes. It has now
+been demonstrated with a real reader. `tools/reader_test.py` downloads one
+anomalous chunk, places it in a minimal local store carrying the published
+`.zarray`, and reads it with zarr.
+
+Result, zarr 3.3.0, chunk `14/9/13`, 16,777,216 bytes where 2,097,152 expected:
+
+```
+ValueError: cannot reshape array of size 16777216 into shape (128,128,128)
+```
+
+With `--sample 10`, ten anomalous objects were downloaded at random (eight
+16 MB, two 128 MB). None is all-zero; non-zero byte counts ranged from 16,674 to
+14,722,166. That is a sample of ten, not a census of all 555, and the claim is
+bounded accordingly. The full level-0 listing confirms exactly 499 objects at
+16 MB and 56 at 128 MB.
